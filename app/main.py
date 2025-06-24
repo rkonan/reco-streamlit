@@ -17,9 +17,27 @@ from io import BytesIO
 import base64
 import tensorflow as tf
 
+import numpy as np
+import tensorflow as tf
+from tf_keras_vis.gradcam import Gradcam
+from tf_keras_vis.utils import normalize
+
+import numpy as np
+import tensorflow as tf
+from tf_keras_vis.saliency import Saliency
+from tf_keras_vis.utils import normalize
+import numpy as np
+import tensorflow as tf
+from tf_keras_vis.saliency import Saliency
+from tf_keras_vis.utils import normalize
+import logging
+
 from streamlit_autorefresh import st_autorefresh
 
 import logging
+
+confidence_threshold=0.4
+entropy_threshold=1.5
 
 logging.basicConfig(
     level=logging.INFO,  # ou logging.DEBUG
@@ -123,7 +141,6 @@ if page == pages[1] :
 if page == pages[2] : 
   st.write("### Modélisation")
   
-
 
 def check_api_status(url="http://localhost:8000/health"):
     try:
@@ -246,7 +263,119 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
 
     return heatmap
 
+
+
+# Configurer le logger (à faire une fois dans ton script principal)
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+
 def compute_saliency_map(model, image_array, class_index=None):
+    """
+    Calcule la carte de saillance avec tf-keras-vis Saliency.
+
+    Args:
+        model: tf.keras.Model.
+        image_array: np.array, shape (H, W, 3), float32, pré-traitée.
+        class_index: int ou None. Si None, prend la classe prédite.
+
+    Returns:
+        saliency_map: np.array float32, normalisée entre 0 et 1, shape (H, W).
+    """
+    logging.info("Début du calcul de la carte de saillance")
+
+    if image_array.ndim == 3:
+        input_tensor = np.expand_dims(image_array, axis=0)
+        logging.debug(f"Image d'entrée dimensionnée de {image_array.shape} à {input_tensor.shape} (batch)")
+    else:
+        input_tensor = image_array
+        logging.debug(f"Image d'entrée déjà batchée avec shape {input_tensor.shape}")
+
+    saliency = Saliency(model)
+    logging.info("Objet Saliency initialisé")
+
+    def loss(output):
+        # output shape: (batch_size, num_classes)
+        if class_index is None:
+            class_index_local = tf.argmax(output[0])
+            logging.info(f"Classe cible non spécifiée, utilisation de la classe prédite: {class_index_local.numpy()}")
+        else:
+            class_index_local = class_index
+            logging.info(f"Classe cible spécifiée: {class_index_local}")
+        return output[:, class_index_local]
+
+    saliency_map = saliency(loss, input_tensor)
+    logging.info("Calcul de la carte de saillance terminé")
+
+    saliency_map = saliency_map[0]  # shape (H, W, 3)
+    logging.debug(f"Shape de la carte brute: {saliency_map.shape}")
+
+    # Prendre le max absolu sur les canaux couleurs pour avoir une carte 2D
+    
+    if saliency_map.ndim == 3:
+        saliency_map = np.max(np.abs(saliency_map), axis=-1)
+    else:
+        saliency_map = np.abs(saliency_map)
+    logging.debug(f"Shape de la carte après réduction canaux: {saliency_map.shape}")
+
+    # Normaliser la carte entre 0 et 1
+    saliency_map = normalize(saliency_map)
+    logging.info("Normalisation de la carte de saillance terminée")
+
+    return saliency_map
+
+
+
+
+
+
+def compute_gradcam(model, image_array, class_index=None, layer_name=None):
+    """
+    Calcule la carte Grad-CAM pour une image et un modèle Keras.
+
+    Args:
+        model: tf.keras.Model.
+        image_array: np.array (H, W, 3), float32, pré-traitée.
+        class_index: int ou None, index de la classe cible. Si None, classe prédite.
+        layer_name: str ou None, nom de la couche convolutionnelle à utiliser. Si None, dernière conv.
+
+    Returns:
+        gradcam_map: np.array (H, W), normalisée entre 0 et 1.
+    """
+
+    if image_array.ndim == 3:
+        input_tensor = np.expand_dims(image_array, axis=0)
+    else:
+        input_tensor = image_array
+
+    gradcam = Gradcam(model, clone=False)
+
+    def loss(output):
+        if class_index is None:
+            class_index_local = tf.argmax(output[0])
+        else:
+            class_index_local = class_index
+        return output[:, class_index_local]
+
+    # Choisir la couche à utiliser pour GradCAM
+    if layer_name is None:
+        # Si non spécifié, chercher la dernière couche conv 2D
+        for layer in reversed(model.layers):
+            if 'conv' in layer.name and len(layer.output_shape) == 4:
+                layer_name = layer.name
+                break
+        if layer_name is None:
+            raise ValueError("Aucune couche convolutionnelle 2D trouvée dans le modèle.")
+
+    cam = gradcam(loss, input_tensor, penultimate_layer=layer_name)
+    cam = cam[0]
+
+    # Normaliser entre 0 et 1
+    cam = normalize(cam)
+
+    return cam
+
+
+
+def compute_saliency_map_basic(model, image_array, class_index=None):
     """
     Calcule la carte de saillance (saliency map) d'une image pour un modèle donné.
 
@@ -305,6 +434,13 @@ def overlay_heatmap(heatmap, image_pil, alpha=0.4):
     image_pil = image_pil.convert("RGBA")
     blended = Image.blend(image_pil, heatmap, alpha)
     return blended
+
+def compute_entropy_safe(probas):
+    probas = np.array(probas)
+    # On garde uniquement les probabilités strictement positives
+    mask = probas > 0
+    entropy = -np.sum(probas[mask] * np.log(probas[mask]))
+    return entropy
 if page == pages[4]:
     st.title("🧠 Prédictions sur plusieurs images")
 
@@ -384,6 +520,8 @@ if page == pages[4]:
                             pred_class_idx = np.argmax(preds)
                             confidence = float(np.max(preds))
                             pred_class_name = class_names[pred_class_idx]
+                            entropy = compute_entropy_safe(preds)
+                            is_uncertain = confidence< confidence_threshold or entropy > entropy_threshold
                             models_names = ["Modèle quantifié (TFLite)"]
                             gradcam_images = []
                         else:
@@ -391,11 +529,14 @@ if page == pages[4]:
                             pred_class_idx = np.argmax(preds)
                             confidence = float(np.max(preds))
                             pred_class_name = class_names[pred_class_idx]
+                            entropy = entropy = compute_entropy_safe(preds)
+                            is_uncertain = confidence< confidence_threshold or entropy > entropy_threshold
                             models_names = ["Modèle float32"]
                             gradcam_images = []
-                            if show_gradcam:
-                                heatmap = compute_saliency_map(model_float32.get_model(), image_data)
-                                cam_overlay = apply_heatmap_on_image(img.resize((224, 224)), heatmap)
+                            if show_gradcam and not is_uncertain :
+                                #heatmap = compute_saliency_map(model_float32.get_model(), image_data)
+                                heatmap= compute_gradcam(model_float32.get_model(),image_data,class_index=None,layer_name="top_conv")
+                                cam_overlay = apply_heatmap_on_image(img.resize((224, 224)), heatmap,0.5)
                                 gradcam_images.append(cam_overlay)
 
                     return {
@@ -404,6 +545,8 @@ if page == pages[4]:
                         "true_class": true_class,
                         "pred_class_name": pred_class_name,
                         "confidence": confidence,
+                        "entropy": entropy,
+                        "is_uncertain":is_uncertain,
                         "models_names": models_names,
                         "models_predictions": models_predictions if is_online and api_up else [],
                         "models_confidences": models_confidences if is_online and api_up else [],
@@ -452,32 +595,39 @@ if page == pages[4]:
                 if res.get("error"):
                     st.error(f"Erreur pour `{res['file_name']}` : {res['error']}")
                     continue
+                
+                if not res['is_uncertain']:
+                    st.image(res['image_obj'], caption=f"Image : {res['file_name']}", use_container_width=True)
+                    st.markdown("### 🔍 Résultat de la prédiction")
+                    st.write(f"📁 Nom du fichier : `{res['file_name']}`")
+                    st.write(f"🏷️ Vraie classe (extrait nom) : `{res['true_class']}`")
+                    st.write(f"✅ Classe prédite : `{res['pred_class_name']}`")
+                    st.write(f"📊 Confiance : **{res['confidence']*100:.2f}%**")
+                    st.write(f"📈 Entropie : **{res['entropy']:.3f}**")
+                    if is_online:
+                        if plan == "Standard":
+                            st.info(f"🧠 Mode : **Standard** — 1 modèle utilisé : `{res['models_names'][0]}`")
+                        elif plan == "Premium":
+                            st.success(f"🌟 Mode : **Premium** — Modèles utilisés : {', '.join(res['models_names'])}")
+                            if len(res['models_names']) > 1:
+                                with st.expander("🔎 Détails des votes de chaque modèle"):
+                                    for i, model_name in enumerate(res['models_names']):
+                                        model_pred_class = res['models_predictions'][i]
+                                        model_confidence = 100 * res['models_confidences'][i]
+                                        st.write(f"🧠 **{model_name}** : classe `{class_names[model_pred_class]}` avec confiance **{model_confidence:.2f}%**")
+                    else:
+                        st.warning(f"⚠️ Mode local : modèle utilisé `{res['models_names'][0]}`")
 
-                st.image(res['image_obj'], caption=f"Image : {res['file_name']}", use_container_width=True)
-                st.markdown("### 🔍 Résultat de la prédiction")
-                st.write(f"📁 Nom du fichier : `{res['file_name']}`")
-                st.write(f"🏷️ Vraie classe (extrait nom) : `{res['true_class']}`")
-                st.write(f"✅ Classe prédite : `{res['pred_class_name']}`")
-                st.write(f"📊 Confiance : **{res['confidence']*100:.2f}%**")
-
-                if is_online:
-                    if plan == "Standard":
-                        st.info(f"🧠 Mode : **Standard** — 1 modèle utilisé : `{res['models_names'][0]}`")
-                    elif plan == "Premium":
-                        st.success(f"🌟 Mode : **Premium** — Modèles utilisés : {', '.join(res['models_names'])}")
-                        if len(res['models_names']) > 1:
-                            with st.expander("🔎 Détails des votes de chaque modèle"):
-                                for i, model_name in enumerate(res['models_names']):
-                                    model_pred_class = res['models_predictions'][i]
-                                    model_confidence = 100 * res['models_confidences'][i]
-                                    st.write(f"🧠 **{model_name}** : classe `{class_names[model_pred_class]}` avec confiance **{model_confidence:.2f}%**")
+                    if res['gradcam_images']:
+                        with st.expander("🖼️ Visualisations Grad-CAM"):
+                            for i, img_cam in enumerate(res['gradcam_images']):
+                                st.image(img_cam, caption=f"Salience - Modèle : {res['models_names'][i]}")
                 else:
-                    st.warning(f"⚠️ Mode local : modèle utilisé `{res['models_names'][0]}`")
-
-                if res['gradcam_images']:
-                    with st.expander("🖼️ Visualisations Grad-CAM"):
-                        for i, img_cam in enumerate(res['gradcam_images']):
-                            st.image(img_cam, caption=f"Salience - Modèle : {res['models_names'][i]}")
+                     st.image(res['image_obj'], caption=f"Image : {res['file_name']}", use_container_width=True)
+                     st.warning("⚠️ Impossible de donner une prédiction fiable sur cette image.", icon="⚠️")
+                     st.write(f"📊 **Confiance trop faible : {res['confidence'] * 100:.2f}%**")
+                     st.write(f"📈 **Entropie élevée : {res['entropy']:.3f}**")
+                     st.info("👉 Veuillez vérifier que l'image est bien celle d'une plante.", icon="🔍")
 
         else:
             st.warning("⚠️ Veuillez uploader au moins une image.")
