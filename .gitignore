@@ -1,1 +1,19 @@
+# Environnements virtuels
 venv/
+.venv/
+env/
+.env/
+
+# Fichiers Python compilés
+app/__pycache__/
+*.pyc
+
+# Fichiers système
+.DS_Store
+
+# Configurations IDE
+.vscode/
+.idea/
+
+# Fichiers de logs
+*.log
