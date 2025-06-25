@@ -36,15 +36,16 @@ from streamlit_autorefresh import st_autorefresh
 
 import logging
 
-confidence_threshold=0.4
+from typing import List, Any
+confidence_threshold=0.6
 entropy_threshold=1.5
 
 logging.basicConfig(
-    level=logging.INFO,  # ou logging.DEBUG
+    level=logging.DEBUG,  # ou logging.DEBUG
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 
-logger = logging.getLogger(__name__)
+
 model_float32= load_model()
 model_dynamique=load_tflite_dyna_model()
 model_ptq=load_tflite_ptq_model()
@@ -157,8 +158,24 @@ def extract_class_name(filename):
     """
     return "___".join(filename.split("___")[:2])
 
+from collections import namedtuple
+from dataclasses import dataclass
+@dataclass
+class PredictionResult:
+    pred_class_name: str
+    confidence: float
+    jsd_score:float
+    is_global_uncertain:bool
+    entropy: float
+    models: List[str]
+    models_predictions: List[Any]
+    models_confidences: List[float]
+    models_entropies: List[float]
+    models_uncertainties: List[bool]
+    gradcam_images: List[Any]
+
 def predict_via_api(image_pil, api_url, mode="single",show_heatmap=False):
-    logger.info("🖼️ Préparation de l'image pour l'envoi à l'API...")
+    logging.info("🖼️ Préparation de l'image pour l'envoi à l'API...")
 
     # Conversion de l'image en base64
     buffered = BytesIO()
@@ -169,23 +186,23 @@ def predict_via_api(image_pil, api_url, mode="single",show_heatmap=False):
     # Construction de l'URL
     url = f"{api_url}?show_heatmap={str(show_heatmap).lower()}"
     url = f"{url}&mode={str(mode).lower()}"
-    logger.info(f"🌐 Envoi de la requête POST à l'API : {url}")
+    logging.info(f"🌐 Envoi de la requête POST à l'API : {url}")
 
     payload = {"image": img_b64}
     
     try:
         response = requests.post(url, json=payload)
     except Exception as e:
-        logger.error(f"❌ Erreur lors de la requête API : {e}")
+        logging.error(f"❌ Erreur lors de la requête API : {e}")
         return None, None, [], [], []
 
     if response.status_code != 200:
-        logger.error(f"❌ Erreur API : code {response.status_code} – {response.text}")
+        logging.error(f"❌ Erreur API : code {response.status_code} – {response.text}")
         return None, None, [], [], []
 
     result = response.json()
 
-    logger.info("✅ Réponse reçue avec succès.")
+    logging.info("✅ Réponse reçue avec succès.")
 
     # Interprétation du nom de classe
     if isinstance(result["predicted_class"], int):
@@ -193,24 +210,33 @@ def predict_via_api(image_pil, api_url, mode="single",show_heatmap=False):
     else:
         pred_class_name = result["predicted_class"]
 
-    logger.info(f"📌 Prédiction : {pred_class_name} avec confiance {result['confidence']:.4f}")
+    logging.info(f"📌 Prédiction : {pred_class_name} avec confiance {result['confidence']:.4f}")
 
     gradcam_images = []
 
     if show_heatmap:
-        logger.info(f"🔥 Génération des heatmaps pour {len(result['models_heatmaps'])} modèles...")
+        logging.info(f"🔥 Génération des heatmaps pour {len(result['models_heatmaps'])} modèles...")
         for idx, heatmap in enumerate(result["models_heatmaps"]):
-            heatmap_array = np.array(heatmap)
-            cam_overlay = apply_heatmap_on_image(image_pil, heatmap_array)
-            gradcam_images.append(cam_overlay)
-            logger.info(f"🖼️ Heatmap générée pour le modèle {result['models'][idx]}")
+            if heatmap is None or (isinstance(heatmap, np.ndarray) and heatmap.size == 0):
+                logging.info(f"⚠️ Heatmap vide ou None pour le modèle {result['models'][idx]}")
+                continue  # On saute l'itération si la heatmap est invalide
+            else:
+                heatmap_array = np.array(heatmap)
+                cam_overlay = apply_heatmap_on_image(image_pil, heatmap_array)
+                gradcam_images.append(cam_overlay)
+                logging.info(f"🖼️ Heatmap générée pour le modèle {result['models'][idx]}")
 
-    return (
+    return PredictionResult (
         pred_class_name,
         result["confidence"],
+        result["jsd_score"],
+        result["is_global_uncertain"],
+        result["entropy"],
         result["models"],
         result["models_predictions"],
         result["models_confidences"],
+        result["models_entropies"],
+        result["models_uncertainties"],
         gradcam_images
     )
     
@@ -266,7 +292,7 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None
 
 
 # Configurer le logger (à faire une fois dans ton script principal)
-logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+
 
 def compute_saliency_map(model, image_array, class_index=None):
     """
@@ -359,12 +385,13 @@ def compute_gradcam(model, image_array, class_index=None, layer_name=None):
     if layer_name is None:
         # Si non spécifié, chercher la dernière couche conv 2D
         for layer in reversed(model.layers):
-            if 'conv' in layer.name and len(layer.output_shape) == 4:
+            #if 'conv' in layer.name and len(layer.output_shape) == 4:
+            if isinstance(layer, tf.keras.layers.Conv2D):
                 layer_name = layer.name
                 break
         if layer_name is None:
             raise ValueError("Aucune couche convolutionnelle 2D trouvée dans le modèle.")
-
+  
     cam = gradcam(loss, input_tensor, penultimate_layer=layer_name)
     cam = cam[0]
 
@@ -471,10 +498,10 @@ if page == pages[4]:
         # Description dynamique
         if "Dynamique" in model_choice:
             st.info("🔹 Modèle Quantifié Dynamique : rapide, idéal pour les mobiles d'entrée de gamme avec des ressources limitées. Grad-CAM indisponible.")
-            model_tflite=model_dynamique
+        
         elif "PTQ" in model_choice:
             st.info("🔹 Modèle Quantifié PTQ : ultra rapide, parfait pour les mobiles très bas de gamme ou anciens. Grad-CAM indisponible.")
-            model_tflite=model_ptq
+           
         else:
             st.info("🔹 Modèle Float32 : plus lourd, nécessite un mobile puissant ou récent. Grad-CAM disponible pour visualiser les activations.")
 
@@ -511,31 +538,65 @@ if page == pages[4]:
                 try:
                     if is_online and api_up:
                         mode_call = "single" if plan == "Standard" else "voting"
-                        pred_class_name, confidence, models_names, models_predictions, models_confidences, gradcam_images = predict_via_api(
+                        res = predict_via_api(
                             img, API_URL, mode_call, show_gradcam
                         )
+                        pred_class_name = res.pred_class_name
+                        logging.debug(f"🎯 Classe prédite : {pred_class_name}")
+
+                        confidence = res.confidence
+                        logging.debug(f"📊 Confiance globale : {confidence:.4f}")
+
+                        models_names = res.models
+                        logging.debug(f"🗂️ Modèles utilisés : {models_names}")
+
+                        models_predictions = res.models_predictions
+                        logging.debug(f"📈 Prédictions des modèles : {models_predictions}")
+
+                        models_confidences = res.models_confidences
+                        logging.debug(f"🔢 Confiances individuelles : {models_confidences}")
+
+                        gradcam_images = res.gradcam_images
+                        logging.debug(f"🖼️ Nombre d'images Grad-CAM générées : {len(gradcam_images)}")
+
+                        entropy = res.entropy
+                        logging.debug(f"📉 Entropie globale : {entropy:.4f}")
+
+                        is_uncertain = res.is_global_uncertain
+                        logging.debug(f"⚡ Statut d'incertitude global (init) : {is_uncertain}")
+
                     else:
-                        if model_choice.startswith("Quantifié"):
-                            preds = model_tflite.predict(img.resize((224, 224)))
-                            pred_class_idx = np.argmax(preds)
-                            confidence = float(np.max(preds))
-                            pred_class_name = class_names[pred_class_idx]
-                            entropy = compute_entropy_safe(preds)
-                            is_uncertain = confidence< confidence_threshold or entropy > entropy_threshold
-                            models_names = ["Modèle quantifié (TFLite)"]
-                            gradcam_images = []
+                        if "Dynamique" in model_choice:
+                            model=model_dynamique
+                            is_tflite = True
+                            models_names = ["Modèle quantifié dynamique"]
+                        elif "PTQ" in model_choice:
+                            model=model_ptq
+                            is_tflite = True
+                            models_names = ["Modèle quantifié PTQ"]
                         else:
-                            preds, image_data = model_float32.predict(img.resize((224, 224)))
-                            pred_class_idx = np.argmax(preds)
-                            confidence = float(np.max(preds))
-                            pred_class_name = class_names[pred_class_idx]
-                            entropy = entropy = compute_entropy_safe(preds)
-                            is_uncertain = confidence< confidence_threshold or entropy > entropy_threshold
+                            model=model_float32
+                            is_tflite = False
                             models_names = ["Modèle float32"]
-                            gradcam_images = []
-                            if show_gradcam and not is_uncertain :
+                            
+                        input_image=img.resize((224, 224))
+                        if is_tflite:
+                             preds = model.predict(input_image)
+                        else:
+                            preds, image_data = model.predict(input_image)
+
+                       
+                        pred_class_idx = np.argmax(preds)
+                        confidence = float(np.max(preds))
+                        pred_class_name = class_names[pred_class_idx]
+                        entropy = entropy = compute_entropy_safe(preds)
+                        is_uncertain = confidence< confidence_threshold or entropy > entropy_threshold
+                           
+                        gradcam_images = []
+                        if not is_tflite and show_gradcam and not is_uncertain:
                                 #heatmap = compute_saliency_map(model_float32.get_model(), image_data)
-                                heatmap= compute_gradcam(model_float32.get_model(),image_data,class_index=None,layer_name="top_conv")
+                                heatmap= compute_gradcam(model_float32.get_model(),image_data,class_index=pred_class_idx,layer_name="top_conv")
+                               
                                 cam_overlay = apply_heatmap_on_image(img.resize((224, 224)), heatmap,0.5)
                                 gradcam_images.append(cam_overlay)
 
@@ -619,9 +680,9 @@ if page == pages[4]:
                         st.warning(f"⚠️ Mode local : modèle utilisé `{res['models_names'][0]}`")
 
                     if res['gradcam_images']:
-                        with st.expander("🖼️ Visualisations Grad-CAM"):
-                            for i, img_cam in enumerate(res['gradcam_images']):
-                                st.image(img_cam, caption=f"Salience - Modèle : {res['models_names'][i]}")
+                         with st.expander("🖼️ Visualisations Grad-CAM"):
+                             for i, img_cam in enumerate(res['gradcam_images']):
+                                 st.image(img_cam, caption=f"Grad-CAM - Modèle : {res['models_names'][i]}")
                 else:
                      st.image(res['image_obj'], caption=f"Image : {res['file_name']}", use_container_width=True)
                      st.warning("⚠️ Impossible de donner une prédiction fiable sur cette image.", icon="⚠️")

@@ -16,7 +16,7 @@ from PIL import Image
 
 # Configurer le logger
 logging.basicConfig(
-    level=logging.DEBUG,  # ou logging.DEBUG
+    level=logging.INFO,  # ou logging.DEBUG
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -24,9 +24,7 @@ logger = logging.getLogger(__name__)
 
 @st.cache_resource
 def load_model():
-   
     model = tf.keras.models.load_model("model/best_efficientnetb0.keras",compile=False)
-    
     return EfficientNetWrapper(model)
 
 @st.cache_resource
@@ -42,7 +40,7 @@ def load_tflite_ptq_model():
 
 
 def preprocess_image(image: Image.Image) -> np.ndarray:
-    image = image.resize((480, 480))
+    image = image.resize((224, 224))
     array = np.array(image) / 255.0
     return np.expand_dims(array, axis=0)
 
@@ -201,11 +199,7 @@ class TFLiteDynamicModel:
         probas=output_data[0]
         logger.debug(f"✅ Probabilités : {probas}")
 
-        # # Classe prédite
-        # predicted_class = np.argmax(probas)
-        # confidence = probas[predicted_class]
-        # logger.info(f"🏷️ Classe prédite : {predicted_class} avec une probabilité de {confidence:.4f}")
-
+    
         logger.info("🎯 Prédiction terminée")
 
         return  probas
@@ -244,7 +238,6 @@ class TFLiteDynamicModel:
 
         # Calcul des probabilités
         logger.info("🧮 Calcul des probabilités avec softmax")
-        #probas = tf.nn.softmax(logits[0]/temperature).numpy()
         probas = logits[0]
         logger.debug(f"✅ Probabilités : {probas}")
 
