@@ -12,8 +12,8 @@ COPY . /app
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
 
-# Expose le port 8501 (par défaut Streamlit)
-EXPOSE 8501
+# Expose le port 7860 
+EXPOSE 7860
 
 # Commande de démarrage
-CMD ["streamlit", "run", "app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "app/main.py", "--server.port=7860", "--server.address=0.0.0.0"]
